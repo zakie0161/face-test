@@ -26,7 +26,7 @@ def load_known_faces():
 
 # Process frames from an IP camera
 def process_ip_camera(stream_url, window_name, frame_skip=5):
-    video_capture = cv2.VideoCapture(0)
+    video_capture = cv2.VideoCapture(stream_url)
     frame_count = 0
 
     if not video_capture.isOpened():
@@ -89,18 +89,12 @@ def process_ip_camera(stream_url, window_name, frame_skip=5):
         video_capture.release()
         cv2.destroyWindow(window_name)
 
-# Run multiple IP cameras
+# Run multiple IP cameras with a thread pool
 def run_multi_ip_cameras(ip_camera_urls):
-    threads = []
-
-    for i, stream_url in enumerate(ip_camera_urls):
-        window_name = f"Camera {i+1}"
-        thread = threading.Thread(target=process_ip_camera, args=(stream_url, window_name))
-        threads.append(thread)
-        thread.start()
-
-    for thread in threads:
-        thread.join()
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for i, stream_url in enumerate(ip_camera_urls):
+            window_name = f"Camera {i+1}"
+            executor.submit(process_ip_camera, stream_url, window_name)
 
 if __name__ == "__main__":
     os.makedirs(IMAGE_FOLDER, exist_ok=True)
@@ -111,3 +105,27 @@ if __name__ == "__main__":
         "rtsp://admin:@WARMUP123@192.168.10.17:554/cam/realmonitor?channel=8&subtype=0",  # Replace with your IP camera URLs
     ]
     run_multi_ip_cameras(ip_camera_urls)
+
+# from flask import Flask, Response
+# import cv2
+
+# app = Flask(__name__)
+# camera = cv2.VideoCapture(0)
+
+# def generate_frames():
+#     while True:
+#         success, frame = camera.read()
+#         if not success:
+#             break
+#         else:
+#             _, buffer = cv2.imencode('.jpg', frame)
+#             frame = buffer.tobytes()
+#             yield (b'--frame\r\n'
+#                    b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+# @app.route('/video_feed')
+# def video_feed():
+#     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+# if __name__ == '__main__':
+#     app.run(host='0.0.0.0', port=5000)
