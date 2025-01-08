@@ -5,6 +5,7 @@ import threading
 import logging
 import os
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 IMAGE_FOLDER = "images"
 KNOWN_FACES_FILE = "known_faces.json"
