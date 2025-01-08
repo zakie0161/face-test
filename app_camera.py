@@ -5,6 +5,7 @@ import threading
 import logging
 import os
 import json
+import queue
 from concurrent.futures import ThreadPoolExecutor
 
 IMAGE_FOLDER = "images"
@@ -25,21 +26,43 @@ def load_known_faces():
     else:
         logging.info("No known faces file found. Starting fresh.")
 
-# Process frames from an IP camera
-def process_ip_camera(stream_url, window_name, frame_skip=5):
-    video_capture = cv2.VideoCapture(stream_url)
+class CameraStream:
+    def __init__(self, stream_url):
+        self.stream_url = stream_url
+        self.cap = cv2.VideoCapture(self.stream_url)
+        self.frame_queue = queue.Queue(maxsize=10)  # Queue to hold frames
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._frame_grabber)
+        self.thread.daemon = True
+        self.thread.start()
+
+    def _frame_grabber(self):
+        """Grab frames from the camera and put them in the queue."""
+        while not self.stop_event.is_set():
+            ret, frame = self.cap.read()
+            if ret:
+                if self.frame_queue.full():
+                    self.frame_queue.get()  # Drop the oldest frame
+                self.frame_queue.put(frame)
+
+    def get_frame(self):
+        """Retrieve a frame from the queue."""
+        if not self.frame_queue.empty():
+            return self.frame_queue.get()
+
+    def stop(self):
+        """Stop the camera stream."""
+        self.stop_event.set()
+        self.thread.join()
+        self.cap.release()
+
+def process_ip_camera(camera_stream, window_name, frame_skip=5):
     frame_count = 0
-
-    if not video_capture.isOpened():
-        print(f"Error: Unable to access stream {stream_url}")
-        return
-
     try:
         while True:
-            ret, frame = video_capture.read()
-            if not ret:
-                print(f"Failed to grab frame from {stream_url}")
-                break
+            frame = camera_stream.get_frame()
+            if frame is None:
+                continue
 
             # Skip frames for performance
             frame_count += 1
@@ -51,7 +74,7 @@ def process_ip_camera(stream_url, window_name, frame_skip=5):
             rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
 
             # Detect faces and encode
-            face_locations = face_recognition.face_locations(rgb_small_frame)
+            face_locations = face_recognition.face_locations(rgb_small_frame, model="hog")  # Use 'hog' for faster performance
             face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
 
             for face_encoding, face_location in zip(face_encodings, face_locations):
@@ -85,17 +108,23 @@ def process_ip_camera(stream_url, window_name, frame_skip=5):
                 break
 
     except Exception as e:
-        logging.error(f"Error in stream {stream_url}: {e}")
+        logging.error(f"Error in stream {window_name}: {e}")
     finally:
-        video_capture.release()
         cv2.destroyWindow(window_name)
 
-# Run multiple IP cameras with a thread pool
 def run_multi_ip_cameras(ip_camera_urls):
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        for i, stream_url in enumerate(ip_camera_urls):
-            window_name = f"Camera {i+1}"
-            executor.submit(process_ip_camera, stream_url, window_name)
+    camera_streams = []
+    for url in ip_camera_urls:
+        camera_streams.append(CameraStream(url))
+
+    with ThreadPoolExecutor(max_workers=len(camera_streams)) as executor:
+        for i, camera_stream in enumerate(camera_streams):
+            window_name = f"Camera {i + 1}"
+            executor.submit(process_ip_camera, camera_stream, window_name)
+
+    # Wait for the threads to finish
+    for camera_stream in camera_streams:
+        camera_stream.stop()
 
 if __name__ == "__main__":
     os.makedirs(IMAGE_FOLDER, exist_ok=True)
@@ -106,27 +135,3 @@ if __name__ == "__main__":
         "rtsp://admin:@WARMUP123@192.168.10.17:554/cam/realmonitor?channel=8&subtype=0",  # Replace with your IP camera URLs
     ]
     run_multi_ip_cameras(ip_camera_urls)
-
-# from flask import Flask, Response
-# import cv2
-
-# app = Flask(__name__)
-# camera = cv2.VideoCapture(0)
-
-# def generate_frames():
-#     while True:
-#         success, frame = camera.read()
-#         if not success:
-#             break
-#         else:
-#             _, buffer = cv2.imencode('.jpg', frame)
-#             frame = buffer.tobytes()
-#             yield (b'--frame\r\n'
-#                    b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-
-# @app.route('/video_feed')
-# def video_feed():
-#     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-# if __name__ == '__main__':
-#     app.run(host='0.0.0.0', port=5000)
