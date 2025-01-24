@@ -1,257 +1,98 @@
-from flask import Flask, request, jsonify
-import face_recognition
-import numpy as np
 import cv2
+import face_recognition
 import os
-import uuid
-import json
-import logging
+import numpy as np
+import dlib
 
-app = Flask(__name__)
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-# Constants
-IMAGE_FOLDER = "images"
-KNOWN_FACES_FILE = "known_faces.json"
-ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png"}
-
-# Global variable to store known faces
-known_faces = []
+print("CUDA available:", dlib.DLIB_USE_CUDA)
 
 
-def allowed_file(filename):
-    """Check if a file has an allowed extension."""
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+# Folder berisi gambar wajah
+face_folder = "detected_faces"  # Ganti dengan folder Anda
 
+# Load semua gambar referensi dari folder dan encode wajahnya
+known_face_encodings = []
+known_face_names = []
 
-def load_known_faces():
-    """Load known faces from a JSON file."""
-    global known_faces
-    if os.path.exists(KNOWN_FACES_FILE):
-        with open(KNOWN_FACES_FILE, "r") as file:
-            known_faces = json.load(file)
-            for face in known_faces:
-                face["encoding"] = np.array(face["encoding"])  # Convert encoding back to NumPy array
-        logging.info("Loaded known faces from file.")
-    else:
-        logging.info("No known faces file found. Starting fresh.")
+for file_name in os.listdir(face_folder):
+    if file_name.endswith(('.jpg', '.jpeg', '.png')):
+        # Load gambar
+        image_path = os.path.join(face_folder, file_name)
+        image = face_recognition.load_image_file(image_path)
+        
+        # Encode wajah (asumsi 1 wajah per gambar)
+        face_encodings = face_recognition.face_encodings(image)
+        if face_encodings:
+            known_face_encodings.append(face_encodings[0])
+            known_face_names.append(os.path.splitext(file_name)[0])  # Nama file sebagai nama wajah
 
+# Akses kamera menggunakan OpenCV
+video_capture = cv2.VideoCapture("rtsp://admin:@WARMUP123@4ca904bdbbde.sn.mynetname.net:554/cam/realmonitor?channel=1&subtype=0")
 
-def save_known_faces():
-    """Save known faces to a JSON file."""
-    with open(KNOWN_FACES_FILE, "w") as file:
-        json.dump(known_faces, file, default=lambda x: x.tolist())  # Convert NumPy arrays to lists
-    logging.info("Saved known faces to file.")
+# Periksa apakah kamera berhasil dibuka
+if not video_capture.isOpened():
+    print("Gagal membuka kamera")
+    exit()
 
+# Gunakan model DNN untuk deteksi wajah (pre-trained model dari Caffe)
+face_proto = "deploy.prototxt"  # Path ke file prototxt
+face_model = "res10_300x300_ssd_iter_140000.caffemodel"  # Path ke file model
 
-@app.route("/recognize", methods=["POST"])
-def recognize_faces():
-    """Recognize faces in an uploaded image."""
-    if 'image' not in request.files:
-        return jsonify({"data": None, "code": 400, "message": "No image file provided"}), 400
+# Load model DNN dengan CUDA
+net = cv2.dnn.readNetFromCaffe(face_proto, face_model)
+net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)  # Set CUDA backend
+net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)  # Set target CUDA
 
-    file = request.files['image']
-    if not allowed_file(file.filename):
-        return jsonify({"data": None, "code": 400, "message": "Invalid file type. Only JPG, JPEG, and PNG are allowed."}), 400
+print("Tekan 'q' untuk keluar")
 
-    # Optional: Get the name filter from form data
-    name_filter = request.form.get('name', None)
+while True:
+    # Tangkap frame dari kamera
+    ret, frame = video_capture.read()
+    if not ret:
+        print("Gagal membaca frame dari kamera")
+        break
 
-    try:
-        # Read and decode the image
-        file_bytes = file.read()
-        nparr = np.frombuffer(file_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    # Mengirim frame ke GPU
+    gpu_frame = cv2.cuda_GpuMat()
+    gpu_frame.upload(frame)
 
-        if img is None:
-            return jsonify({"data": None, "code": 400, "message": "Unable to decode image file"}), 400
+    # Konversi frame ke format yang diterima oleh DNN
+    blob = cv2.dnn.blobFromImage(gpu_frame.download(), 1.0, (300, 300), (104.0, 177.0, 123.0), swapRB=False, crop=False)
+    net.setInput(blob)
+    detections = net.forward()
 
-        # Convert to RGB and detect faces
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        face_locations = face_recognition.face_locations(img_rgb)
-        face_encodings = face_recognition.face_encodings(img_rgb, face_locations)
+    # Proses deteksi wajah
+    for i in range(detections.shape[2]):
+        confidence = detections[0, 0, i, 2]
+        if confidence > 0.5:  # Ambang batas kepercayaan
+            # Lokasi wajah
+            box = detections[0, 0, i, 3:7] * np.array([frame.shape[1], frame.shape[0], frame.shape[1], frame.shape[0]])
+            (x1, y1, x2, y2) = box.astype("int")
 
-        if not face_encodings:
-            return jsonify({"data": None, "code": 404, "message": "No face detected"}), 404
+            # Gambarkan kotak di sekitar wajah
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        # If a name filter is provided, filter known faces by the name
-        filtered_known_faces = (
-            [f for f in known_faces if f["name"].lower() == name_filter.lower()]
-            if name_filter else known_faces
-        )
+            # Tambahkan label nama (menggunakan face recognition)
+            face_encoding = face_recognition.face_encodings(frame, [(y1, x2, y2, x1)])
+            face = frame[y1:y2, x1:x2]
+            if face_encoding:
+                matches = face_recognition.compare_faces(known_face_encodings, face_encoding[0])
+                name = "Unknown"
+                if True in matches:
+                    match_index = matches.index(True)
+                    name = known_face_names[match_index]
+                # else:   
+                #     face_filename = os.path.join("detected_faces", f"face_test.jpg")
+                #     cv2.imwrite(face_filename, face)  
+                cv2.putText(frame, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
 
-        if not filtered_known_faces:
-            return jsonify({"data": None, "code": 404, "message": f"No known faces match"}), 404
+    # Tampilkan frame dengan kotak dan nama
+    cv2.imshow('Video', frame)
 
-        # Compare detected faces with known faces
-        best_match = None
-        highest_confidence = 0
+    # Tekan 'q' untuk keluar
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-        for face_encoding in face_encodings:
-            matches = face_recognition.compare_faces(
-                [np.array(f["encoding"]) for f in filtered_known_faces], face_encoding)
-            face_distances = face_recognition.face_distance(
-                [np.array(f["encoding"]) for f in filtered_known_faces], face_encoding)
-
-            if True in matches:
-                best_match_index = np.argmin(face_distances)
-                confidence = 1 - face_distances[best_match_index]
-                
-                if confidence > highest_confidence:
-                    highest_confidence = confidence
-                    best_match = {
-                        "name": filtered_known_faces[best_match_index]["name"],
-                        "path": filtered_known_faces[best_match_index]["path"],
-                        "confidence": round(confidence, 2),
-                    }
-
-        if best_match:
-            return jsonify({"data": best_match, "code": 200, "message": "Success"})
-        else:
-            return jsonify({"data": None, "code": 404, "message": "No known faces recognized in the image"}), 404
-
-    except Exception as e:
-        logging.error(f"Error in recognize_faces: {e}")
-        return jsonify({"data": None, "code": 500, "error": "Failed to process image", "details": str(e)}), 500
-
-
-@app.route("/faces", methods=["GET", "POST", "PUT", "DELETE"])
-def manage_faces():
-    """CRUD operations for known faces."""
-    global known_faces
-
-    if request.method == "GET":
-        # Return the list of known faces
-        return jsonify({"data": [{"name": f["name"], "path": f["path"]} for f in known_faces], "code": 200, "message": "Success"})
-
-    elif request.method == "POST":
-        # Add a new known face
-        if 'image' not in request.files or 'name' not in request.form:
-            return jsonify({"data": None, "code": 400, "message": "Image file and name are required"}), 400
-
-        file = request.files['image']
-        name = request.form['name']
-
-        if not allowed_file(file.filename):
-            return jsonify({"data": None, "code": 400, "message": "Invalid file type. Only JPG, JPEG, and PNG are allowed."}), 400
-
-        try:
-            # Save the uploaded image
-            file_extension = file.filename.rsplit('.', 1)[-1].lower()
-            random_filename = f"{uuid.uuid4()}.{file_extension}"
-            save_path = os.path.join(IMAGE_FOLDER, random_filename)
-            file.save(save_path)
-
-            # Process the saved image for face recognition
-            img = cv2.imread(save_path)
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            encodings = face_recognition.face_encodings(img_rgb)
-
-            if not encodings:
-                os.remove(save_path)
-                return jsonify({"data": None, "code": 400, "message": "No face detected in the image"}), 404
-
-            known_faces.append({
-                "name": name,
-                "encoding": encodings[0],
-                "path": save_path
-            })
-            save_known_faces()
-
-            return jsonify({"data": None, "code": 200, "message": f"Added {name} to known faces", "path": save_path}), 201
-
-        except Exception as e:
-            logging.error(f"Error in POST /faces: {e}")
-            return jsonify({"data": None, "code": 400, "message": "Failed to add face", "details": str(e)}), 500
-
-    elif request.method == "PUT":
-        # Update an existing face
-        if 'name' not in request.form:
-            return jsonify({"data": None, "code": 400, "message": "Name is required to update a face"}), 400
-
-        name = request.form['name']
-        new_name = request.form.get('new_name')  # Optional
-        new_image = request.files.get('image')  # Optional
-
-        face_record = next((f for f in known_faces if f["name"] == name), None)
-        if not face_record:
-            return jsonify({"data": None, "code": 400, "message": f"No face found with name '{name}'"}), 404
-
-        try:
-            if new_name:
-                face_record["name"] = new_name
-
-            if new_image:
-                file_extension = new_image.filename.rsplit('.', 1)[-1].lower()
-                random_filename = f"{uuid.uuid4()}.{file_extension}"
-                new_save_path = os.path.join(IMAGE_FOLDER, random_filename)
-                new_image.save(new_save_path)
-
-                img = cv2.imread(new_save_path)
-                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                encodings = face_recognition.face_encodings(img_rgb)
-
-                if not encodings:
-                    os.remove(new_save_path)
-                    return jsonify({"data": None, "code": 404, "message": "No face detected in the new image"}), 404
-
-                os.remove(face_record["path"])  # Remove the old image
-                face_record["encoding"] = encodings[0]
-                face_record["path"] = new_save_path
-
-            save_known_faces()
-            return jsonify({"data": name, "code": 200, "message": f"Updated face for '{name}'"}), 200
-
-        except Exception as e:
-            logging.error(f"Error in PUT /faces: {e}")
-            return jsonify({"data": None, "code": 500, "message": "Failed to update face", "details": str(e)}), 500
-
-    elif request.method == "DELETE":
-        if 'name' not in request.args:
-            return jsonify({"data": None, "code": 400, "message": "Name is required to delete a face"}), 400
-
-        name = request.args['name']
-        face_record = next((f for f in known_faces if f["name"] == name), None)
-
-        if not face_record:
-            return jsonify({"data": None, "code": 404, "message": f"No face found with name '{name}'"}), 404
-
-        try:
-            os.remove(face_record["path"])
-            known_faces.remove(face_record)
-            save_known_faces()
-            return jsonify({"data": name, "code": 200, "message": f"Deleted face for '{name}'"}), 200
-
-        except Exception as e:
-            logging.error(f"Error in DELETE /faces: {e}")
-            return jsonify({"data": None, "code": 500, "message": "Failed to delete face", "details": str(e)}), 500
-
-
-@app.route("/delete_all_faces", methods=["DELETE"])
-def delete_all_faces():
-    """Delete all known faces."""
-    global known_faces
-
-    try:
-        # Loop through all known faces and delete their image files
-        for face in known_faces:
-            if os.path.exists(face["path"]):  # Check if the file exists
-                os.remove(face["path"])  # Delete the image file
-
-        # Clear the known_faces list
-        known_faces = []
-
-        return jsonify({"data": None, "code": 200, "message": "All known faces have been deleted."}), 200
-
-    except Exception as e:
-        logging.error(f"Error in delete_all_faces: {e}")
-        return jsonify({"data": None, "code": 500, "message": "Failed to delete all faces", "details": str(e)}), 500
-
-
-
-if __name__ == "__main__":
-    os.makedirs(IMAGE_FOLDER, exist_ok=True)
-    load_known_faces()
-    app.run(host="0.0.0.0", port=8000, debug=True)
+# Bersihkan
+video_capture.release()
+cv2.destroyAllWindows()

@@ -1,145 +1,95 @@
-import cv2
+import cv2 # type: ignore
 import numpy as np
-import face_recognition
 import threading
-import logging
 import os
-import json
-import queue
-from concurrent.futures import ThreadPoolExecutor
+import face_recognition
 
-IMAGE_FOLDER = "images"
-KNOWN_FACES_FILE = "known_faces.json"
+# Function for face detection on a single video stream
+def process_video(video_path, window_name):
+    # Load the DNN face detection model with CUDA support
+    net = cv2.dnn.readNetFromCaffe("deploy.prototxt", "res10_300x300_ssd_iter_140000_fp16.caffemodel")
+    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)  # Use CUDA backend
+    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)    # Use CUDA target
+    
+    output_dir = "detected_faces"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
-# Preload known faces
-known_faces = []
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print(f"Error: Unable to open video {video_path}")
+        return
 
-def load_known_faces():
-    """Load known faces from a JSON file."""
-    global known_faces
-    if os.path.exists(KNOWN_FACES_FILE):
-        with open(KNOWN_FACES_FILE, "r") as file:
-            known_faces = json.load(file)
-            for face in known_faces:
-                face["encoding"] = np.array(face["encoding"])  # Convert encoding back to NumPy array
-        logging.info("Loaded known faces from file.")
-    else:
-        logging.info("No known faces file found. Starting fresh.")
-
-class CameraStream:
-    def __init__(self, stream_url):
-        self.stream_url = stream_url
-        self.cap = cv2.VideoCapture(self.stream_url)
-        self.frame_queue = queue.Queue(maxsize=10)  # Queue to hold frames
-        self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self._frame_grabber)
-        self.thread.daemon = True
-        self.thread.start()
-
-    def _frame_grabber(self):
-        """Grab frames from the camera and put them in the queue."""
-        while not self.stop_event.is_set():
-            ret, frame = self.cap.read()
-            if ret:
-                if self.frame_queue.full():
-                    self.frame_queue.get()  # Drop the oldest frame
-                self.frame_queue.put(frame)
-
-    def get_frame(self):
-        """Retrieve a frame from the queue."""
-        if not self.frame_queue.empty():
-            return self.frame_queue.get()
-
-    def stop(self):
-        """Stop the camera stream."""
-        self.stop_event.set()
-        self.thread.join()
-        self.cap.release()
-
-def process_ip_camera(camera_stream, window_name, frame_skip=5):
     frame_count = 0
-    try:
-        # CUDA Face Detection Model (Haar Cascade)
-        face_cascade = cv2.cuda.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    saved_count = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-        while True:
-            frame = camera_stream.get_frame()
-            if frame is None:
-                continue
+        # Resize the frame using CUDA for better performance
+        gpu_frame = cv2.cuda_GpuMat()
+        gpu_frame.upload(frame)  # Upload frame to GPU
+        gpu_frame_resized = cv2.cuda.resize(gpu_frame, (640, 480))  # Resize in GPU (higher resolution)
+        frame_resized = gpu_frame_resized.download()  # Download the resized frame back to CPU
 
-            # Skip frames for performance
-            frame_count += 1
-            if frame_count % frame_skip != 0:
-                continue
+        # Convert resized frame to blob suitable for DNN processing
+        blob = cv2.dnn.blobFromImage(frame_resized, 1.0, (300, 300), (104, 177, 123), swapRB=True, crop=False)
+        net.setInput(blob)
+        detections = net.forward()
 
-            # Resize frame for faster processing
-            small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-            rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+        # Get the frame dimensions
+        (h, w) = frame_resized.shape[:2]
+        for i in range(detections.shape[2]):
+            confidence = detections[0, 0, i, 2]
+            if confidence > 0.5:  # Increased confidence threshold for better accuracy
+                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+                (startX, startY, endX, endY) = box.astype("int")
+                cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
+                face = frame_resized[startY:endY, startX:endX]
+                img_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                face_locations = face_recognition.face_locations(img_rgb)
+                face_encodings = face_recognition.face_encodings(img_rgb, face_locations)
+                if(face_encodings):
+                    print("found")
+                face_filename = os.path.join(output_dir, f"face_{saved_count:04d}.jpg")
+                # cv2.imwrite(face_filename, face)
+                # saved_count += 1
 
-            # Upload the frame to the GPU
-            gpu_frame = cv2.cuda_GpuMat()
-            gpu_frame.upload(rgb_small_frame)
 
-            # Detect faces using CUDA-accelerated OpenCV Haar Cascade
-            faces = face_cascade.detectMultiScale(gpu_frame, 1.1, 4)
+        # Display the frame with detected faces
+        cv2.imshow(window_name, frame)
 
-            for (x, y, w, h) in faces:
-                # Draw rectangle around detected face
-                cv2.rectangle(frame, (x * 4, y * 4), ((x + w) * 4, (y + h) * 4), (0, 255, 0), 2)
+        # Exit if 'q' is pressed
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-                # Extract face region for face encoding (use dlib for face recognition)
-                face_region = rgb_small_frame[y:y+h, x:x+w]
-                face_encoding = face_recognition.face_encodings(face_region)
+    cap.release()
+    cv2.destroyWindow(window_name)
 
-                if face_encoding:
-                    face_encoding = face_encoding[0]
-                    matches = face_recognition.compare_faces(
-                        [np.array(f["encoding"]) for f in known_faces], face_encoding)
-                    face_distances = face_recognition.face_distance(
-                        [np.array(f["encoding"]) for f in known_faces], face_encoding)
+# Function to start multiple video processing threads
+def start_video_processing(video_paths):
+    threads = []
+    
+    # Create and start a thread for each video file
+    for i, video_path in enumerate(video_paths):
+        window_name = f"Video {i+1}"
+        thread = threading.Thread(target=process_video, args=(video_path, window_name))
+        threads.append(thread)
+        thread.start()
 
-                    if True in matches:
-                        best_match_index = np.argmin(face_distances)
-                        confidence = 1 - face_distances[best_match_index]
+    # Wait for all threads to finish
+    for thread in threads:
+        thread.join()
 
-                        name = known_faces[best_match_index]["name"]
-                        cv2.putText(frame, f"{name} ({confidence:.2f})", (x * 4, y * 4 - 10),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                    else:
-                        cv2.putText(frame, "Unknown", (x * 4, y * 4 - 10),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-
-            # Show the video feed
-            cv2.imshow(window_name, frame)
-
-            # Exit if 'q' is pressed
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
-    except Exception as e:
-        logging.error(f"Error in stream {window_name}: {e}")
-    finally:
-        cv2.destroyWindow(window_name)
-
-def run_multi_ip_cameras(ip_camera_urls):
-    camera_streams = []
-    for url in ip_camera_urls:
-        camera_streams.append(CameraStream(url))
-
-    with ThreadPoolExecutor(max_workers=len(camera_streams)) as executor:
-        for i, camera_stream in enumerate(camera_streams):
-            window_name = f"Camera {i + 1}"
-            executor.submit(process_ip_camera, camera_stream, window_name)
-
-    # Wait for the threads to finish
-    for camera_stream in camera_streams:
-        camera_stream.stop()
-
-if __name__ == "__main__":
-    os.makedirs(IMAGE_FOLDER, exist_ok=True)
-    load_known_faces()
-    # List of IP camera stream URLs
-    ip_camera_urls = [
-        "rtsp://admin:@WARMUP123@192.168.10.17:554/cam/realmonitor?channel=8&subtype=0",  # Replace with your IP camera URLs
+# List of video files you want to process
+video_paths = [
+    "video.mp4", 
+    # "rtsp://admin:@WARMUP123@4ca904bdbbde.sn.mynetname.net:554/cam/realmonitor?channel=7&subtype=0",
+    # "rtsp://admin:@WARMUP123@4ca904bdbbde.sn.mynetname.net:554/cam/realmonitor?channel=8&subtype=0",
+    # "rtsp://admin:@WARMUP123@4ca904bdbbde.sn.mynetname.net:554/cam/realmonitor?channel=2&subtype=0"
+    # "rtsp://admin:@WARMUP123@4ca904bdbbde.sn.mynetname.net:554/cam/realmonitor?channel=1&subtype=0"
     ]
-    run_multi_ip_cameras(ip_camera_urls)
+
+# Start processing the videos concurrently
+start_video_processing(video_paths)

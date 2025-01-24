@@ -1,153 +1,98 @@
 import cv2
+import mediapipe as mp
 import numpy as np
-import face_recognition
-import threading
-import logging
 import os
-import json
-import queue
-from concurrent.futures import ThreadPoolExecutor
 
-IMAGE_FOLDER = "images"
-KNOWN_FACES_FILE = "known_faces.json"
+# Initialize MediaPipe Face Mesh
+mp_face_mesh = mp.solutions.face_mesh
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
 
-# Preload known faces
-known_faces = []
+# Directory to save unique faces
+output_dir = "saved_faces"
+os.makedirs(output_dir, exist_ok=True)
 
-def load_known_faces():
-    """Load known faces from a JSON file."""
-    global known_faces
-    if os.path.exists(KNOWN_FACES_FILE):
-        with open(KNOWN_FACES_FILE, "r") as file:
-            known_faces = json.load(file)
-            for face in known_faces:
-                face["encoding"] = np.array(face["encoding"])  # Convert encoding back to NumPy array
-        logging.info("Loaded known faces from file.")
-    else:
-        logging.info("No known faces file found. Starting fresh.")
+# Function to calculate histogram for a face region
+def calculate_histogram(image, rect):
+    x, y, w, h = rect
+    face_roi = image[y:y+h, x:x+w]
+    hist = cv2.calcHist([face_roi], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
+    hist = cv2.normalize(hist, hist).flatten()
+    return hist
 
-class CameraStream:
-    def __init__(self, stream_url):
-        self.stream_url = stream_url
-        self.cap = cv2.VideoCapture(self.stream_url)
-        self.frame_queue = queue.Queue(maxsize=10)  # Queue to hold frames
-        self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self._frame_grabber)
-        self.thread.daemon = True
-        self.thread.start()
+# Function to check if a face is unique
+def is_unique_face(hist, known_faces, threshold=0.4):
+    for known_hist in known_faces:
+        similarity = cv2.compareHist(hist, known_hist, cv2.HISTCMP_CORREL)
+        if similarity > threshold:
+            return False
+    return True
 
-    def _frame_grabber(self):
-        """Grab frames from the camera and put them in the queue."""
-        while not self.stop_event.is_set():
-            ret, frame = self.cap.read()
-            if ret:
-                if self.frame_queue.full():
-                    self.frame_queue.get()  # Drop the oldest frame
-                self.frame_queue.put(frame)
+# Initialize face mesh
+cap = cv2.VideoCapture("video.mp4")
 
-    def get_frame(self):
-        """Retrieve a frame from the queue."""
-        if not self.frame_queue.empty():
-            return self.frame_queue.get()
+# To store histograms of unique faces
+unique_faces_histograms = []
 
-    def stop(self):
-        """Stop the camera stream."""
-        self.stop_event.set()
-        self.thread.join()
-        self.cap.release()
+with mp_face_mesh.FaceMesh(
+        static_image_mode=False,
+        max_num_faces=100,
+        refine_landmarks=True,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5) as face_mesh:
+    
+    face_counter = 0
+    while cap.isOpened():
+        success, frame = cap.read()
+        if not success:
+            break
 
-def process_ip_camera(camera_stream, window_name, frame_skip=5):
-    frame_count = 0
+        # Convert the image to RGB
+        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    try:
-        # Load DNN model for face detection
-        face_net = cv2.dnn.readNetFromCaffe(
-            "deploy.prototxt",  # Path to the .prototxt file
-            "res10_300x300_ssd_iter_140000_fp16.caffemodel"  # Path to the .caffemodel file
-        )
-        face_net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-        face_net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+        # Process the image and find the face mesh
+        results = face_mesh.process(image)
 
-        while True:
-            frame = camera_stream.get_frame()
-            if frame is None:
-                continue
+        # Convert back to BGR for rendering
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-            # Skip frames for performance
-            frame_count += 1
-            if frame_count % frame_skip != 0:
-                continue
+        # Draw face mesh landmarks
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                # Get bounding box of the face
+                h, w, _ = image.shape
+                xs = [int(landmark.x * w) for landmark in face_landmarks.landmark]
+                ys = [int(landmark.y * h) for landmark in face_landmarks.landmark]
+                x_min, x_max = max(min(xs) - 10, 0), min(max(xs) + 10, w)
+                y_min, y_max = max(min(ys) - 10, 0), min(max(ys) + 10, h)
 
-            # Resize frame for faster processing
-            (h, w) = frame.shape[:2]
-            blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
-            
-            # Pass blob through the network for face detection
-            face_net.setInput(blob)
-            detections = face_net.forward()
+                # Define face rectangle
+                face_rect = (x_min, y_min, x_max - x_min, y_max - y_min)
 
-            for i in range(0, detections.shape[2]):
-                confidence = detections[0, 0, i, 2]
-                if confidence > 0.5:  # Confidence threshold
-                    box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                    (startX, startY, endX, endY) = box.astype("int")
+                # Calculate histogram for the face
+                hist = calculate_histogram(image, face_rect)
 
-                    # Draw rectangle around detected face
-                    cv2.rectangle(frame, (startX, startY), (endX, endY), (0, 255, 0), 2)
+                # Check if the face is unique
+                if is_unique_face(hist, unique_faces_histograms):
+                    # Save the face if unique
+                    unique_faces_histograms.append(hist)
+                    face_counter += 1
+                    face_image = image[y_min:y_max, x_min:x_max]
+                    cv2.imwrite(os.path.join(output_dir, f"face_{face_counter}.jpg"), face_image)
 
-                    # Extract face region for face encoding (use dlib or face_recognition)
-                    face_region = frame[startY:endY, startX:endX]
-                    face_encoding = face_recognition.face_encodings(face_region)
+                # Draw the face mesh
+                mp_drawing.draw_landmarks(
+                    image=image,
+                    landmark_list=face_landmarks,
+                    connections=mp_face_mesh.FACEMESH_TESSELATION,
+                    landmark_drawing_spec=None,
+                    connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_tesselation_style())
 
-                    if face_encoding:
-                        face_encoding = face_encoding[0]
-                        matches = face_recognition.compare_faces(
-                            [np.array(f["encoding"]) for f in known_faces], face_encoding)
-                        face_distances = face_recognition.face_distance(
-                            [np.array(f["encoding"]) for f in known_faces], face_encoding)
+        # Display the output
+        cv2.imshow('MediaPipe Face Mesh', image)
 
-                        if True in matches:
-                            best_match_index = np.argmin(face_distances)
-                            confidence = 1 - face_distances[best_match_index]
+        if cv2.waitKey(5) & 0xFF == 27:
+            break
 
-                            name = known_faces[best_match_index]["name"]
-                            cv2.putText(frame, f"{name} ({confidence:.2f})", (startX, startY - 10),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                        else:
-                            cv2.putText(frame, "Unknown", (startX, startY - 10),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-
-            # Show the video feed
-            cv2.imshow(window_name, frame)
-
-            # Exit if 'q' is pressed
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-
-    except Exception as e:
-        logging.error(f"Error in stream {window_name}: {e}")
-    finally:
-        cv2.destroyWindow(window_name)
-
-def run_multi_ip_cameras(ip_camera_urls):
-    camera_streams = []
-    for url in ip_camera_urls:
-        camera_streams.append(CameraStream(url))
-
-    with ThreadPoolExecutor(max_workers=len(camera_streams)) as executor:
-        for i, camera_stream in enumerate(camera_streams):
-            window_name = f"Camera {i + 1}"
-            executor.submit(process_ip_camera, camera_stream, window_name)
-
-    # Wait for the threads to finish
-    for camera_stream in camera_streams:
-        camera_stream.stop()
-
-if __name__ == "__main__":
-    os.makedirs(IMAGE_FOLDER, exist_ok=True)
-    load_known_faces()
-    # List of IP camera stream URLs
-    ip_camera_urls = [
-        "rtsp://admin:@WARMUP123@192.168.10.17:554/cam/realmonitor?channel=8&subtype=0",  # Replace with your IP camera URLs
-    ]
-    run_multi_ip_cameras(ip_camera_urls)
+cap.release()
+cv2.destroyAllWindows()
