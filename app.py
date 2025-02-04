@@ -120,21 +120,21 @@ def recognize_faces():
             if employee_guid_filter:
                 query = query.where(employee_table.c.employee_guid == employee_guid_filter)
 
-            known_faces = session.execute(query).fetchall()
-            if not known_faces:
-                return jsonify({"data": None, "code": 404, "message": "No known faces for the provided employee_guid"}), 404
+                known_faces = session.execute(query).fetchall()
+                if not known_faces:
+                    return jsonify({"data": None, "code": 404, "message": "No known faces for the provided employee_guid"}), 404
 
-            # Prepare known faces for comparison
-            known_encodings = [string_to_encoding(face["encoding"]) for face in known_faces]
-            known_face_info = [
-                {
-                    "id": face["id"],
-                    "employee_guid": face["employee_guid"],
-                    "employee_name": face["employee_name"],
-                    "path": face["images_path"],
-                }
-                for face in known_faces
-            ]
+                # Prepare known faces for comparison
+                known_encodings = [string_to_encoding(face[4]) for face in known_faces]  # Assuming 'encoding' is the 5th column (index 4)
+                known_face_info = [
+                    {
+                    "id": row.id,  # Assuming 'id' is the 1st column (index 0)
+                    "employee_guid": row.employee_guid,  # 'employee_guid' is the 2nd column (index 1)
+                    "employee_name": row.employee_name,  # 'employee_name' is the 3rd column (index 2)
+                    "path": row.images_path,  # 'images_path' is the 4th column (index 3)
+                    }
+                    for row in known_faces
+                ]
 
             best_match = None
             highest_confidence = 0
@@ -150,7 +150,7 @@ def recognize_faces():
                     if confidence > highest_confidence:
                         highest_confidence = confidence
                         best_match = {
-                            "id": known_face_info[best_match_index]["id"],
+                            # "id": known_face_info[best_match_index]["id"],
                             "employee_guid": known_face_info[best_match_index]["employee_guid"],
                             "employee_name": known_face_info[best_match_index]["employee_name"],
                             "path": known_face_info[best_match_index]["path"],
@@ -174,15 +174,16 @@ def manage_faces():
         if request.method == "GET":
             # Retrieve all faces from the database
             try:
-                query = select(employee_table)
+                query = select(employee_table.c.employee_guid, employee_table.c.employee_name, employee_table.c.images_path)
                 result = session.execute(query).fetchall()
                 faces = [
                     {
-                        "guid": row["employee_guid"],
-                        "name": row["employee_name"],
-                        "path": row["images_path"]
+                    "employee_guid": row.employee_guid,
+                    "name": row.employee_name,
+                    "path": row.images_path
                     } for row in result
                 ]
+
                 return jsonify({"data": faces, "code": 200, "message": "Success"})
             except Exception as e:
                 logging.error(f"Error in GET /faces: {e}")
@@ -220,7 +221,7 @@ def manage_faces():
                 new_face = {
                     'employee_guid': employee_guid,
                     'employee_name': name,
-                    'encoding': encoding_str,
+                    # 'encoding': encoding_str,
                     'images_path': save_path
                 }
 
@@ -246,6 +247,7 @@ def manage_faces():
             try:
                 # Fetch the face record
                 query = select(employee_table).where(employee_table.c.employee_guid == employee_guid)
+                
                 face_record = session.execute(query).fetchone()
 
                 if not face_record:
@@ -272,8 +274,8 @@ def manage_faces():
                         return jsonify({"data": None, "code": 404, "message": "No face detected in the new image"}), 404
 
                     # Remove old image
-                    if os.path.exists(face_record["images_path"]):
-                        os.remove(face_record["images_path"])
+                    if os.path.exists(face_record.images_path):
+                        os.remove(face_record.images_path)
 
                     updates["encoding"] = encoding_to_string(encodings[0])
                     updates["images_path"] = new_save_path
@@ -283,7 +285,7 @@ def manage_faces():
                 session.execute(stmt)
                 session.commit()
 
-                return jsonify({"data": face_record["id"], "code": 200, "message": "Face updated successfully"}), 200
+                return jsonify({"data": face_record.employee_guid, "code": 200, "message": "Face updated successfully"}), 200
 
             except Exception as e:
                 logging.error(f"Error in PUT /faces: {e}")
@@ -309,8 +311,8 @@ def manage_faces():
                 session.commit()
 
                 # Remove the associated image file
-                if os.path.exists(face_record["images_path"]):
-                    os.remove(face_record["images_path"])
+                if os.path.exists(face_record.images_path):
+                    os.remove(face_record.images_path)
 
                 return jsonify({"data": employee_guid, "code": 200, "message": "Face deleted successfully"}), 200
 
