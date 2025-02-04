@@ -100,6 +100,9 @@ def recognize_faces():
     try:
         # Read and decode the image
         file_bytes = file.read()
+        if not file_bytes:
+            return jsonify({"data": None, "code": 400, "message": "Empty image file provided"}), 400
+
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
@@ -120,47 +123,46 @@ def recognize_faces():
             if employee_guid_filter:
                 query = query.where(employee_table.c.employee_guid == employee_guid_filter)
 
-                known_faces = session.execute(query).fetchall()
-                if not known_faces:
-                    return jsonify({"data": None, "code": 404, "message": "No known faces for the provided employee_guid"}), 404
+            known_faces = session.execute(query).fetchall()
+            if not known_faces:
+                return jsonify({"data": None, "code": 404, "message": "No known faces for the provided employee_guid"}), 404
 
-                # Prepare known faces for comparison
-                known_encodings = [string_to_encoding(face[4]) for face in known_faces]  # Assuming 'encoding' is the 5th column (index 4)
-                known_face_info = [
-                    {
+            # Prepare known faces for comparison
+            known_encodings = [string_to_encoding(face[4]) for face in known_faces]  # Assuming 'encoding' is the 5th column (index 4)
+            known_face_info = [
+                {
                     "id": row.id,  # Assuming 'id' is the 1st column (index 0)
                     "employee_guid": row.employee_guid,  # 'employee_guid' is the 2nd column (index 1)
                     "employee_name": row.employee_name,  # 'employee_name' is the 3rd column (index 2)
                     "path": row.images_path,  # 'images_path' is the 4th column (index 3)
+                }
+                for row in known_faces
+            ]
+
+        best_match = None
+        highest_confidence = 0
+
+        for face_encoding in face_encodings:
+            matches = face_recognition.compare_faces(known_encodings, face_encoding)
+            face_distances = face_recognition.face_distance(known_encodings, face_encoding)
+
+            if True in matches:
+                best_match_index = np.argmin(face_distances)
+                confidence = 1 - face_distances[best_match_index]
+
+                if confidence > highest_confidence:
+                    highest_confidence = confidence
+                    best_match = {
+                        "employee_guid": known_face_info[best_match_index]["employee_guid"],
+                        "employee_name": known_face_info[best_match_index]["employee_name"],
+                        "path": known_face_info[best_match_index]["path"],
+                        "confidence": round(confidence, 2),
                     }
-                    for row in known_faces
-                ]
 
-            best_match = None
-            highest_confidence = 0
-
-            for face_encoding in face_encodings:
-                matches = face_recognition.compare_faces(known_encodings, face_encoding)
-                face_distances = face_recognition.face_distance(known_encodings, face_encoding)
-
-                if True in matches:
-                    best_match_index = np.argmin(face_distances)
-                    confidence = 1 - face_distances[best_match_index]
-
-                    if confidence > highest_confidence:
-                        highest_confidence = confidence
-                        best_match = {
-                            # "id": known_face_info[best_match_index]["id"],
-                            "employee_guid": known_face_info[best_match_index]["employee_guid"],
-                            "employee_name": known_face_info[best_match_index]["employee_name"],
-                            "path": known_face_info[best_match_index]["path"],
-                            "confidence": round(confidence, 2),
-                        }
-
-            if best_match:
-                return jsonify({"data": best_match, "code": 200, "message": "Success"})
-            else:
-                return jsonify({"data": None, "code": 404, "message": "No matching faces found"}), 404
+        if best_match:
+            return jsonify({"data": best_match, "code": 200, "message": "Success"})
+        else:
+            return jsonify({"data": None, "code": 404, "message": "No matching faces found"}), 404
 
     except Exception as e:
         logging.error(f"Error in recognize_faces: {e}")
@@ -221,7 +223,7 @@ def manage_faces():
                 new_face = {
                     'employee_guid': employee_guid,
                     'employee_name': name,
-                    # 'encoding': encoding_str,
+                    'encoding': encoding_str,
                     'images_path': save_path
                 }
 
