@@ -1,16 +1,17 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 import face_recognition
 import numpy as np
 import cv2
 import os
 import uuid
 import logging
-from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Text, select, delete, update
+from sqlalchemy import create_engine, Table, Column, Integer, String, MetaData, Text, select, delete, update, func
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.future import select  # Correct import for SQLAlchemy 2.0
 from dotenv import load_dotenv
 import json
 from urllib.parse import quote
+from collections import OrderedDict
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -168,25 +169,122 @@ def recognize_faces():
         logging.error(f"Error in recognize_faces: {e}")
         return jsonify({"data": None, "code": 500, "error": "Failed to process image", "details": str(e)}), 500
 
+@app.route('/face/list', methods=['POST'])
+def get_faces():
+    # Get the JSON body from the POST request
+    filter_params = request.json
+    
+    # Check if filter_params exists and is a dictionary
+    if not filter_params:
+        return jsonify({"data": None, "code": 400, "message": "Invalid request body, must be JSON."}), 400
+    
+    # Extract the filter section and pagination parameters
+    filters = filter_params.get('filter', {})
+    limit = filter_params.get('limit', 10)
+    page = filter_params.get('page', 1)
+    offset = (page - 1) * limit
+    
+    try:
+        with Session() as session:
+            # Build the query for fetching faces
+            query = select(
+                employee_table.c.employee_guid,
+                employee_table.c.employee_name,
+                employee_table.c.images_path
+            )
+
+            # Build the count query
+            count_query = select(func.count().label('total_data')).select_from(employee_table)
+        
+            # Apply filters based on the parameters
+            if filters.get("set_employee_name", False) and filters.get("employee_name"):
+                query = query.where(employee_table.c.employee_name.like(f"%{filters['employee_name']}%"))
+                count_query = count_query.where(employee_table.c.employee_name.like(f"%{filters['employee_name']}%"))
+        
+            if filters.get("set_employee_guid", False) and filters.get("employee_guid"):
+                query = query.where(employee_table.c.employee_guid == filters['employee_guid'])
+                count_query = count_query.where(employee_table.c.employee_guid == filters['employee_guid'])
+                
+
+            # Apply pagination
+            query = query.limit(limit).offset(offset)
+        
+            # Execute the query and fetch results for faces
+            result = session.execute(query).fetchall()
+
+            faces = [
+                {
+                    "employee_guid": row.employee_guid,
+                    "name": row.employee_name,
+                    "path": row.images_path
+                } for row in result
+            ]
+
+            # Execute the count query
+            total_data_result = session.execute(count_query).fetchone()
+
+            # The result of the count query is a tuple, so access the first element
+            total_data = total_data_result[0]  # Access the count value from the tuple
+            
+            # Calculate total pages
+            total_page = (total_data + limit - 1) // limit  # Use ceiling division to get the total pages
+
+            # Construct response using the required structure
+            response = OrderedDict([
+                ("data", faces),
+                ("code", 200),
+                ("message", "Success"),
+                ("current_page", page),
+                ("limit", limit),
+                ("total_page", total_page),
+                ("total_data", total_data)
+            ])
+
+            # Manually serialize the OrderedDict into JSON and return it as a Response
+            json_response = json.dumps(response)
+            return Response(json_response, mimetype='application/json')
+    
+    except Exception as e:
+        logging.error(f"Error in POST /faces/list: {e}")
+        return jsonify({"data": None, "code": 500, "message": "Failed to fetch faces", "details": str(e)}), 500
+
+
 
 @app.route("/faces", methods=["GET", "POST", "PUT", "DELETE"])
 def manage_faces():
     """CRUD operations for known faces."""
     with Session() as session:
         if request.method == "GET":
-            # Retrieve all faces from the database
             try:
+                # Get the employee_guid from query parameters if available
+                employee_guid = request.args.get('employee_guid', None)
+                if not employee_guid:
+                    return jsonify({"data": None, "code": 400, "message": "employee_guid is required"}), 400
+                # Start the query
                 query = select(employee_table.c.employee_guid, employee_table.c.employee_name, employee_table.c.images_path)
-                result = session.execute(query).fetchall()
-                faces = [
-                    {
-                    "employee_guid": row.employee_guid,
-                    "name": row.employee_name,
-                    "path": row.images_path
-                    } for row in result
-                ]
 
-                return jsonify({"data": faces, "code": 200, "message": "Success"})
+                # If employee_guid is provided, add a filter to the query
+                if employee_guid:
+                    query = query.where(employee_table.c.employee_guid == employee_guid)
+
+                    # Execute the query
+                    result = session.execute(query).fetchone()
+
+                    # Prepare the faces data
+                if result:
+                    # Prepare the face data
+                    face = {
+                            "employee_guid": result.employee_guid,
+                            "name": result.employee_name,
+                            "path": result.images_path
+                    }
+
+                    # Return the response as a single object (not a list)
+                    return jsonify({"data": face, "code": 200, "message": "Success"})
+                else:
+                     # If no employee is found with the given employee_guid
+                    return jsonify({"data": None, "code": 404, "message": "Employee not found"}), 404
+                
             except Exception as e:
                 logging.error(f"Error in GET /faces: {e}")
                 return jsonify({"data": None, "code": 500, "message": "Failed to fetch faces", "details": str(e)}), 500
@@ -227,11 +325,17 @@ def manage_faces():
                     'images_path': save_path
                 }
 
+                response_face = {
+                    'employee_guid': employee_guid,
+                    'employee_name': name,
+                    'images_path': save_path
+                }
+
                 stmt = employee_table.insert().values(new_face)
                 session.execute(stmt)
                 session.commit()
 
-                return jsonify({"data": new_face, "code": 201, "message": "Face added successfully"})
+                return jsonify({"data": response_face, "code": 200, "message": "Face added successfully"})
 
             except Exception as e:
                 logging.error(f"Error in POST /faces: {e}")
