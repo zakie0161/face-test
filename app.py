@@ -223,7 +223,7 @@ def get_faces():
                 {
                     "employee_guid": row.employee_guid,
                     "name": row.employee_name,
-                    "path": f"https://dev-ai-tintin.wit.id/images/{row.images_path}"
+                    "path": f"https://dev-ai-tintin.wit.id/{row.images_path}"
                 } for row in result
             ]
 
