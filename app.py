@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_from_directory
 import face_recognition
 import numpy as np
 import cv2
@@ -169,6 +169,13 @@ def recognize_faces():
         logging.error(f"Error in recognize_faces: {e}")
         return jsonify({"data": None, "code": 500, "error": "Failed to process image", "details": str(e)}), 500
 
+@app.route('/images/<path:filename>')
+def get_image(filename):
+    image_path = os.path.join("images", filename)
+    if not os.path.exists(image_path):
+        return jsonify({"code": 404, "message": "Image not found"}), 404
+    return send_from_directory('images', filename)
+
 @app.route('/face/list', methods=['POST'])
 def get_faces():
     # Get the JSON body from the POST request
@@ -216,7 +223,7 @@ def get_faces():
                 {
                     "employee_guid": row.employee_guid,
                     "name": row.employee_name,
-                    "path": row.images_path
+                    "path": f"https://dev-ai-tintin.wit.id/images/{row.images_path}"
                 } for row in result
             ]
 
