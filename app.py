@@ -141,7 +141,7 @@ def recognize_faces():
             ]
 
         best_match = None
-        highest_confidence = 0.59
+        highest_confidence = 0.5
 
         for face_encoding in face_encodings:
             matches = face_recognition.compare_faces(known_encodings, face_encoding)
