@@ -437,4 +437,4 @@ def manage_faces():
 if __name__ == "__main__":
     os.makedirs(IMAGE_FOLDER, exist_ok=True)
     metadata.create_all(engine)  # Ensure the table is created
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000, debug=False)
