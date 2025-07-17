@@ -254,4 +254,4 @@ def delete_all_faces():
 if __name__ == "__main__":
     os.makedirs(IMAGE_FOLDER, exist_ok=True)
     load_known_faces()
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8081, debug=True)
